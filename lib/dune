@@ -1,0 +1,6 @@
+(include_subdirs unqualified)
+
+(library
+ (name camlbinators)
+ (public_name camlbinators)
+ (preprocess (pps ppx_deriving.show)))
