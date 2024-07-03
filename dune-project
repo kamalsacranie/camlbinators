@@ -22,7 +22,8 @@
  (depends
    (ocaml (= 5.1.1))
    dune
-   ppx_deriving)
+   ppx_deriving
+   (ocaml-lsp-server :dev))
  (tags
   (topics "to describe" your project)))
 
