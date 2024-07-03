@@ -13,6 +13,7 @@ depends: [
   "ocaml" {= "5.1.1"}
   "dune" {>= "3.16"}
   "ppx_deriving"
+  "ppx_deriving_yojson"
   "ocaml-lsp-server" {dev}
   "odoc" {with-doc}
 ]

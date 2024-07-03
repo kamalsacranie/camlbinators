@@ -1,8 +1,9 @@
+(** The module which describes the metadata and its handling for the parser.
+    These metadata actions are used by the parser to handle metadata with
+    whatever is inside the parser *)
 module type ParserInner = sig
-  type metadata [@@deriving show]
+  type metadata [@@deriving show, yojson]
   type error = string [@@deriving show]
-
-  (* Figure out a nicer way to handle errors*)
   type 'a with_md [@@deriving show]
 
   val md : 'a with_md -> metadata
@@ -28,7 +29,7 @@ end
 module type Parser = sig
   type atom [@@deriving show]
   type feed [@@deriving show]
-  type metadata [@@deriving show]
+  type metadata [@@deriving show, yojson]
   type 'a with_md [@@deriving show]
   type state [@@deriving show]
   type input = { input : feed; pos : int; state : state } [@@deriving show]
@@ -42,6 +43,7 @@ module type Parser = sig
   val md : 'a with_md -> metadata
   val nomd : 'a with_md -> 'a
   val bind_md : metadata -> 'a -> 'a with_md
+  val ( <^> ) : 'a -> metadata -> 'a with_md
   val split_md : 'a with_md -> 'a * metadata
   val default_md : metadata
   val take_input_md : int -> metadata
@@ -107,7 +109,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
      and type state = I.state = struct
   type atom = I.atom [@@deriving show]
   type feed = I.feed [@@deriving show]
-  type metadata = M.metadata [@@deriving show]
+  type metadata = M.metadata [@@deriving show, yojson]
   type 'a with_md = 'a M.with_md [@@deriving show]
   type state = I.state [@@deriving show]
   type input = { input : feed; pos : int; state : state } [@@deriving show]
@@ -118,19 +120,40 @@ module Parser (M : ParserInner) (I : ParserInput) :
 
   type 'a t = { parse : input -> 'a parser_result }
 
+  (** Given a thing & its associated metdata, just returns its metadata *)
   let md = M.md
-  let nomd = M.nomd
-  let bind_md = M.bind_md
-  let split_md = M.split_md
-  let default_md = M.default_md
-  let take_input_md = M.take_input_md
-  let merge_mds = M.merge_mds
-  let md_fmap f x = x |> M.nomd |> f |> M.bind_md (x |> M.md)
 
+  (** Given a thing & its associated metadata, just returns the thing *)
+  let nomd = M.nomd
+
+  (** Binds some metadata to some thing *)
+  let bind_md = M.bind_md
+
+  let ( <^> ) a b = M.bind_md b a
+
+  (** Splits some thing & its metadata into a tuple of the thing and its
+      metadata *)
+  let split_md = M.split_md
+
+  (** Creates the default metadata to assign to a thing *)
+  let default_md = M.default_md
+
+  (** A function which receives the position when taking from the feed and creates some
+      metadata. We really need to find a way to make it so that we pass the
+      atom as well but right now the types don't really allow it *)
+  let take_input_md = M.take_input_md
+
+  (** A function to merge an abitrary number of metadatas *)
+  let merge_mds = M.merge_mds
+
+  (** Applies a function to the thing but not its metadata *)
+  let md_fmap f x = x |> M.nomd |> f <^> (x |> M.md)
+
+  (** Applicative behaviour for metadata things *)
   let md_apply (f : ('a -> 'b) with_md) (x : 'a with_md) : 'b with_md =
     let f, mdf = M.split_md f in
     let x, mdx = M.split_md x in
-    f x |> M.bind_md (M.merge_mds [ mdf; mdx ])
+    f x <^> M.merge_mds [ mdf; mdx ]
 
   (** [wrap p] take the parser [p] and runs the parser on the input. It then
     wraps the parsed token, which consists of the actual token and its
@@ -143,7 +166,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
   let wrap (p : 'a t) : 'a with_md t =
     let parse input =
       Result.bind (p.parse input) (fun (a, input') ->
-          Result.ok (a |> M.bind_md (M.md a), input'))
+          Result.ok (a <^> M.md a, input'))
     in
     { parse }
 
@@ -163,9 +186,9 @@ module Parser (M : ParserInner) (I : ParserInput) :
   let ( $$> ) f p = f $> (p |> wrap)
   let ( <$$ ) p f = f $$> p
 
-  (** Canonical pure function. Takes [x] and wraps it with the default provided metadata value *)
-  let pure x =
-    { parse = (fun input -> Result.ok (x |> M.bind_md M.default_md, input)) }
+  (** Canonical pure function. Takes [x] and wraps it with the default provided
+      metadata value *)
+  let pure x = { parse = (fun input -> Result.ok (x <^> M.default_md, input)) }
 
   (** Used for lifting a value with its metadata alread bound, into a parser
       monad. I.e., [x] is an instance of ['a M.with_md] *)
@@ -202,7 +225,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
           let aa, mda = M.split_md a in
           bind ((mf aa).parse input') (fun (b, input'') ->
               let bb, mdb = M.split_md b in
-              ok (bb |> M.bind_md (M.merge_mds [ mda; mdb ]), input'')))
+              ok (bb <^> M.merge_mds [ mda; mdb ], input'')))
     in
     { parse }
 
@@ -225,7 +248,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
     pa >>== fun a ->
     pb >>== fun b ->
     let merged_mds = M.merge_mds [ a |> M.md; b |> M.md ] in
-    pure_whole (a |> M.nomd |> M.bind_md merged_mds)
+    pure_whole (a |> M.nomd <^> merged_mds)
 
   (** Like *> but merges the metadata of the inner item that is ignored *)
   let ( **> ) pa pb =
@@ -233,13 +256,13 @@ module Parser (M : ParserInner) (I : ParserInput) :
     (* let pb = (some_sep (some digit) (symbol ',')) in *)
     pa >>== fun a ->
     pb >>== fun b ->
-    pure_whole (b |> M.nomd |> M.bind_md (M.merge_mds [ a |> M.md; b |> M.md ]))
+    pure_whole (b |> M.nomd <^> M.merge_mds [ a |> M.md; b |> M.md ])
 
   let replace pa b = pa >>= fun _ -> pure b
   let ( << ) = replace
 
   let pass =
-    let parser input = Result.ok (() |> M.bind_md M.default_md, input) in
+    let parser input = Result.ok (() <^> M.default_md, input) in
     { parse = parser }
 
   let fail e =
@@ -277,7 +300,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
   let is' p =
     let open Result in
     let parser input =
-      bind (p.parse input) (fun _ -> ok (() |> M.bind_md M.default_md, input))
+      bind (p.parse input) (fun _ -> ok (() <^> M.default_md, input))
     in
     { parse = parser }
 
@@ -285,7 +308,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
     let parser input =
       match p.parse input with
       | Ok _ -> (fail (fun _ -> "didn't satisfy not")).parse input
-      | Error _ -> Result.ok (() |> M.bind_md M.default_md, input)
+      | Error _ -> Result.ok (() <^> M.default_md, input)
     in
     { parse = parser }
 
@@ -298,7 +321,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
       | None -> (fail (fun _ -> "end of input")).parse i
       | Some (head, rest) ->
           ok
-            ( head |> M.bind_md (M.take_input_md pos),
+            ( head <^> M.take_input_md pos,
               { input = rest; pos = pos + 1; state } )
     in
     { parse }
@@ -332,7 +355,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
     let parse input =
       let result_as, input' = many' [] input in
       let span = List.map (fun r -> r |> M.md) result_as |> M.merge_mds in
-      Result.ok (List.rev result_as |> M.bind_md span, input')
+      Result.ok (List.rev result_as <^> span, input')
     in
     { parse }
 
@@ -349,8 +372,8 @@ module Parser (M : ParserInner) (I : ParserInput) :
           match p.parse input with
           | Ok (a, input') ->
               let a, md = M.split_md a in
-              Ok (Some a |> M.bind_md md, input')
-          | Error _ -> Ok (None |> M.bind_md M.default_md, input));
+              Ok (Some a <^> md, input')
+          | Error _ -> Ok (None <^> M.default_md, input));
     }
 
   let ( ?% ) = optional
@@ -358,7 +381,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
   let many_sep p sep =
     choice
       [
-        (fun x xs -> x :: xs) $> (p |> wrap) <*> many (sep *> p);
+        (fun x xs -> x :: xs) $$> p <*> many (sep *> p);
         (function Some x -> [ x ] | None -> []) $> ?%(p |> wrap);
       ]
 
@@ -371,14 +394,12 @@ module Parser (M : ParserInner) (I : ParserInput) :
     <* ?%sep <!> "couldn't match one or more delimited items"
 
   let get =
-    let parse (input : input) =
-      Ok (input.state |> M.bind_md M.default_md, input)
-    in
+    let parse (input : input) = Ok (input.state <^> M.default_md, input) in
     { parse }
 
   let set new_state =
     let parse { input; pos; _ } =
-      Ok (() |> M.bind_md M.default_md, { input; pos; state = new_state })
+      Ok (() <^> M.default_md, { input; pos; state = new_state })
     in
     { parse }
 

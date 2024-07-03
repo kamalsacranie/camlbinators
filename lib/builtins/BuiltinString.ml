@@ -1,8 +1,8 @@
 module StringParserInner = struct
-  type metadata' = { s : int; l : int } [@@deriving show]
-  type metadata = metadata' option [@@deriving show]
+  type metadata' = { s : int; l : int } [@@deriving show, yojson]
+  type metadata = metadata' option [@@deriving show, yojson]
   type error = string [@@deriving show]
-  type 'a with_md = 'a * metadata [@@deriving show]
+  type 'a with_md = 'a * metadata [@@deriving show, yojson]
 
   let md (_, md) = md
   let nomd (a, _) = a
