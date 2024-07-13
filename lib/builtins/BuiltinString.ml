@@ -1,8 +1,8 @@
 module StringParserInner = struct
-  type metadata' = { s : int; l : int } [@@deriving show, yojson]
-  type metadata = metadata' option [@@deriving show, yojson]
+  type metadata' = { s : int; l : int } [@@deriving show, eq, yojson]
+  type metadata = metadata' option [@@deriving show, eq, yojson]
   type error = string [@@deriving show]
-  type 'a with_md = 'a * metadata [@@deriving show, yojson]
+  type 'a with_md = 'a * metadata [@@deriving show, eq, yojson]
 
   let md (_, md) = md
   let nomd (a, _) = a
@@ -30,12 +30,12 @@ module StringParserInner = struct
 end
 
 module StringInput (M : sig
-  type state [@@deriving show]
+  type state [@@deriving show, eq]
 end) =
 struct
   type atom = char [@@deriving show]
   type feed = string [@@deriving show]
-  type state = M.state [@@deriving show]
+  type state = M.state [@@deriving show, eq]
 
   let valid_string input = String.length input > 0
   let head input = if valid_string input then Some input.[0] else None
@@ -62,14 +62,14 @@ module Utils = struct
 end
 
 module Parser (M : sig
-  type state [@@deriving show]
+  type state [@@deriving show, eq]
 end) =
 struct
   include Parser.Parser (StringParserInner) (StringInput (M))
   open Utils
 
-  let many_char_as_string p = (fun a -> string_of_char_list a) $> many_merge p
-  let some_char_as_string p = (fun a -> string_of_char_list a) $> some_merge p
+  let many_char_as_string p = string_of_char_list $> many_merge p
+  let some_char_as_string p = string_of_char_list $> some_merge p
   let digit = satisfies is_digit <!> "failed to match digit character"
 
   let lowercase =

@@ -2,9 +2,9 @@
     These metadata actions are used by the parser to handle metadata with
     whatever is inside the parser *)
 module type ParserInner = sig
-  type metadata [@@deriving show, yojson]
+  type metadata [@@deriving show, eq, yojson]
   type error = string [@@deriving show]
-  type 'a with_md [@@deriving show]
+  type 'a with_md [@@deriving show, eq]
 
   val md : 'a with_md -> metadata
   val nomd : 'a with_md -> 'a
@@ -29,7 +29,7 @@ end
 module type Parser = sig
   type atom [@@deriving show]
   type feed [@@deriving show]
-  type metadata [@@deriving show, yojson]
+  type metadata [@@deriving show, eq, yojson]
   type 'a with_md [@@deriving show]
   type state [@@deriving show]
   type input = { input : feed; pos : int; state : state } [@@deriving show]
@@ -97,7 +97,9 @@ module type Parser = sig
   val some_sep : 'a t -> 'b t -> 'a with_md list t
   val get : state t
   val set : state -> unit t
-  val modify : (state -> state) -> state t
+  val modify : (state -> state) -> unit t
+  val p_lazy : 'a t lazy_t -> 'a t
+  val mapping : ('a t * 'b) list -> 'b t
 end
 
 module Parser (M : ParserInner) (I : ParserInput) :
@@ -109,8 +111,8 @@ module Parser (M : ParserInner) (I : ParserInput) :
      and type state = I.state = struct
   type atom = I.atom [@@deriving show]
   type feed = I.feed [@@deriving show]
-  type metadata = M.metadata [@@deriving show, yojson]
-  type 'a with_md = 'a M.with_md [@@deriving show]
+  type metadata = M.metadata [@@deriving show, eq, yojson]
+  type 'a with_md = 'a M.with_md [@@deriving show, eq]
   type state = I.state [@@deriving show]
   type input = { input : feed; pos : int; state : state } [@@deriving show]
   type error = { err : string; pos : int; state : state } [@@deriving show]
@@ -129,6 +131,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
   (** Binds some metadata to some thing *)
   let bind_md = M.bind_md
 
+  (** Binds some metadata to some thing *)
   let ( <^> ) a b = M.bind_md b a
 
   (** Splits some thing & its metadata into a tuple of the thing and its
@@ -381,17 +384,17 @@ module Parser (M : ParserInner) (I : ParserInput) :
   let many_sep p sep =
     choice
       [
-        (fun x xs -> x :: xs) $$> p <*> many (sep *> p);
-        (function Some x -> [ x ] | None -> []) $> ?%(p |> wrap);
+        (fun x xs -> x :: xs) $$> p <*> many (sep *> p) <* ?%sep;
+        (function Some x -> [ x ] | None -> []) $> ?%(p |> wrap <* ?%sep);
       ]
 
   let many_sep_merge p sep = merge_list_md $> many_sep p sep
 
   let some_sep p sep =
-    (fun x xs -> x :: xs)
-    $> (p |> wrap)
-    <*> many (sep *> p)
-    <* ?%sep <!> "couldn't match one or more delimited items"
+    many_sep p sep >>= fun els ->
+    if List.length els < 1 then
+      fail (fun _ -> "couldn't match one or more delimited items")
+    else pure els
 
   let get =
     let parse (input : input) = Ok (input.state <^> M.default_md, input) in
@@ -403,5 +406,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
     in
     { parse }
 
-  let modify f = (f $> get >>= set) *> get
+  let modify f = f $> get >>= set
+  let p_lazy p = { parse = (fun input -> (Lazy.force p).parse input) }
+  let mapping ts = ts |> List.map (fun (sign, ty) -> sign << ty) |> choice
 end
