@@ -100,6 +100,7 @@ module type Parser = sig
   val modify : (state -> state) -> unit t
   val p_lazy : 'a t lazy_t -> 'a t
   val mapping : ('a t * 'b) list -> 'b t
+  val rept : int -> 'a t -> 'a list t
 end
 
 module Parser (M : ParserInner) (I : ParserInput) :
@@ -349,6 +350,8 @@ module Parser (M : ParserInner) (I : ParserInput) :
     satisfies (fun a -> a == c)
     <!> Printf.sprintf "Failed to match atom %s" (I.show_atom c)
 
+  (* TODO: figure out the correct reversing for this and all its dependencies
+     *)
   let many p =
     let rec many' acc input =
       match p.parse input with
@@ -367,6 +370,12 @@ module Parser (M : ParserInner) (I : ParserInput) :
   let some' p many = List.cons $> p <*> many <!> "failed to match one or more"
   let some p = some' (p |> wrap) (many p)
   let some_merge p = some' p (many_merge p)
+
+  let rec rept n p =
+    match n - 1 with
+    | 0 -> (fun x -> x :: []) $> p
+    | n when n > 0 -> (fun p ps -> p :: ps) $> p <*> rept (n - 1) p
+    | _ -> fail (fun _ -> "can't repeat a parser negative times")
 
   let optional (p : 'a t) =
     {
