@@ -5,40 +5,36 @@ module type ParserInner = sig
   type metadata [@@deriving show, eq, yojson]
   type error = string [@@deriving show]
   type 'a with_md [@@deriving show, eq]
+  type atom [@@deriving show]
+  type input [@@deriving show]
+  type state [@@deriving show]
 
   val md : 'a with_md -> metadata
   val nomd : 'a with_md -> 'a
   val bind_md : metadata -> 'a -> 'a with_md
-  val split_md : 'a with_md -> 'a * metadata
   val default_md : metadata
-  val take_input_md : int -> metadata
+  val take_input_md : input -> metadata
   val merge_mds : metadata list -> metadata
-end
-
-module type ParserInput = sig
-  type atom [@@deriving show]
-  type feed [@@deriving show]
-  type state [@@deriving show]
-
-  val head : feed -> atom option
-  val rest : feed -> feed option
-  val separate : feed -> (atom * feed) option
+  val head : input -> atom option
+  val rest : input -> input option
+  val separate : input -> (atom * input) option
   val show_atom : atom -> string
+  val create_error : error -> input * state -> error
 end
 
 module type Parser = sig
   type atom [@@deriving show]
-  type feed [@@deriving show]
+  type input [@@deriving show]
   type metadata [@@deriving show, eq, yojson]
   type 'a with_md [@@deriving show]
   type state [@@deriving show]
-  type input = { input : feed; pos : int; state : state } [@@deriving show]
-  type error = { err : string; pos : int; state : state } [@@deriving show]
+  type error [@@deriving show]
+  (* { err : string; pos : int; state : state } *)
 
-  type 'a parser_result = ('a with_md * input, error list) result
+  type 'a parser_result = ('a with_md * input * state, error list) result
   [@@deriving show]
 
-  type 'a t = { parse : input -> 'a parser_result }
+  type 'a t = { parse : input * state -> 'a parser_result }
 
   val md : 'a with_md -> metadata
   val nomd : 'a with_md -> 'a
@@ -46,7 +42,7 @@ module type Parser = sig
   val ( <^> ) : 'a -> metadata -> 'a with_md
   val split_md : 'a with_md -> 'a * metadata
   val default_md : metadata
-  val take_input_md : int -> metadata
+  val take_input_md : input -> metadata
   val merge_mds : metadata list -> metadata
   val md_fmap : ('a -> 'b) -> 'a with_md -> 'b with_md
   val md_apply : ('a -> 'b) with_md -> 'a with_md -> 'b with_md
@@ -72,7 +68,7 @@ module type Parser = sig
   val replace : 'a t -> 'b -> 'b t
   val ( << ) : 'a t -> 'b -> 'b t
   val pass : unit t
-  val fail : (feed -> string) -> 'a t
+  val fail : string -> 'a t
   val alternate : 'a t -> 'a t -> 'a t
   val ( <|> ) : 'a t -> 'a t -> 'a t
   val choice : 'a t list -> 'a t
@@ -81,7 +77,7 @@ module type Parser = sig
   val is_not : 'a t -> unit t
   val take : atom t
   val satisfies : (atom -> bool) -> atom t
-  val ( <!!> ) : 'a t -> (feed -> string) -> 'a t
+  val ( <!!> ) : 'a t -> (input * state -> string) -> 'a t
   val ( <!> ) : 'a t -> string -> 'a t
   val atom : atom -> atom t
   val many : 'a t -> 'a with_md list t
@@ -95,6 +91,7 @@ module type Parser = sig
   val many_sep : 'a t -> 'b t -> 'a with_md list t
   val many_sep_merge : 'a t -> 'b t -> 'a list t
   val some_sep : 'a t -> 'b t -> 'a with_md list t
+  val some_sep_merge : 'a t -> 'b t -> 'a list t
   val get : state t
   val set : state -> unit t
   val modify : (state -> state) -> unit t
@@ -103,25 +100,25 @@ module type Parser = sig
   val rept : int -> 'a t -> 'a list t
 end
 
-module Parser (M : ParserInner) (I : ParserInput) :
+module Parser (M : ParserInner) :
   Parser
-    with type atom = I.atom
-     and type feed = I.feed
+    with type atom = M.atom
+     and type input = M.input
      and type 'a with_md = 'a M.with_md
      and type metadata = M.metadata
-     and type state = I.state = struct
-  type atom = I.atom [@@deriving show]
-  type feed = I.feed [@@deriving show]
+     and type error = M.error
+     and type state = M.state = struct
+  type atom = M.atom [@@deriving show]
+  type input = M.input [@@deriving show]
   type metadata = M.metadata [@@deriving show, eq, yojson]
   type 'a with_md = 'a M.with_md [@@deriving show, eq]
-  type state = I.state [@@deriving show]
-  type input = { input : feed; pos : int; state : state } [@@deriving show]
-  type error = { err : string; pos : int; state : state } [@@deriving show]
+  type state = M.state [@@deriving show]
+  type error = M.error [@@deriving show]
 
-  type 'a parser_result = ('a with_md * input, error list) result
+  type 'a parser_result = ('a with_md * input * state, error list) result
   [@@deriving show]
 
-  type 'a t = { parse : input -> 'a parser_result }
+  type 'a t = { parse : input * state -> 'a parser_result }
 
   (** Given a thing & its associated metdata, just returns its metadata *)
   let md = M.md
@@ -137,7 +134,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
 
   (** Splits some thing & its metadata into a tuple of the thing and its
       metadata *)
-  let split_md = M.split_md
+  let split_md x = (x |> nomd, x |> md)
 
   (** Creates the default metadata to assign to a thing *)
   let default_md = M.default_md
@@ -155,8 +152,8 @@ module Parser (M : ParserInner) (I : ParserInput) :
 
   (** Applicative behaviour for metadata things *)
   let md_apply (f : ('a -> 'b) with_md) (x : 'a with_md) : 'b with_md =
-    let f, mdf = M.split_md f in
-    let x, mdx = M.split_md x in
+    let f, mdf = split_md f in
+    let x, mdx = split_md x in
     f x <^> M.merge_mds [ mdf; mdx ]
 
   (** [wrap p] take the parser [p] and runs the parser on the input. It then
@@ -168,9 +165,9 @@ module Parser (M : ParserInner) (I : ParserInput) :
     this will yield [val x: char with_md with_md]. This means the parser
     will continue modifying the outermd in the next parse functions. *)
   let wrap (p : 'a t) : 'a with_md t =
-    let parse input =
-      Result.bind (p.parse input) (fun (a, input') ->
-          Result.ok (a <^> M.md a, input'))
+    let parse stateful_input =
+      Result.bind (p.parse stateful_input) (fun (a, input, state) ->
+          Result.ok (a <^> M.md a, input, state))
     in
     { parse }
 
@@ -179,9 +176,10 @@ module Parser (M : ParserInner) (I : ParserInput) :
     @param p is a parser of type 'a
     @return 'b t, the parser after having the function applied to the inner value *)
   let map (f : 'a -> 'b) (p : 'a t) =
-    let parse input =
+    let parse stateful_input =
       Result.(
-        bind (p.parse input) (fun (x, input') -> ok (md_fmap f x, input')))
+        bind (p.parse stateful_input) (fun (x, input, state) ->
+            ok (md_fmap f x, input, state)))
     in
     { parse }
 
@@ -192,17 +190,24 @@ module Parser (M : ParserInner) (I : ParserInput) :
 
   (** Canonical pure function. Takes [x] and wraps it with the default provided
       metadata value *)
-  let pure x = { parse = (fun input -> Result.ok (x <^> M.default_md, input)) }
+  let pure x =
+    {
+      parse =
+        (fun (input, state) -> Result.ok (x <^> M.default_md, input, state));
+    }
 
   (** Used for lifting a value with its metadata alread bound, into a parser
       monad. I.e., [x] is an instance of ['a M.with_md] *)
-  let pure_whole x = { parse = (fun input -> Result.ok (x, input)) }
+  let pure_whole x =
+    { parse = (fun (input, state) -> Result.ok (x, input, state)) }
 
   let apply (mf : ('a -> 'b) t) (p : 'a t) =
     let open Result in
-    let parse input =
-      bind (mf.parse input) (fun (f, input') ->
-          bind (p.parse input') (fun (a, input'') -> ok (md_apply f a, input'')))
+    let parse stateful_input =
+      bind (mf.parse stateful_input) (fun (f, input, state) ->
+          bind
+            (p.parse (input, state))
+            (fun (a, input', state') -> ok (md_apply f a, input', state')))
     in
     { parse }
 
@@ -215,8 +220,9 @@ module Parser (M : ParserInner) (I : ParserInput) :
       the opening anclosing bracket metadatas and merge them with the between
       bracket item metadata *)
   let longbind (p : 'a t) (mf : 'a with_md -> 'b t) : 'b t =
-    let parse input =
-      Result.bind (p.parse input) (fun (a, input') -> (mf a).parse input')
+    let parse stateful_input =
+      Result.bind (p.parse stateful_input) (fun (a, input, state) ->
+          (mf a).parse (input, state))
     in
     { parse }
 
@@ -224,12 +230,14 @@ module Parser (M : ParserInner) (I : ParserInput) :
 
   let bind p mf =
     let open Result in
-    let parse input =
-      bind (p.parse input) (fun (a, input') ->
-          let aa, mda = M.split_md a in
-          bind ((mf aa).parse input') (fun (b, input'') ->
-              let bb, mdb = M.split_md b in
-              ok (bb <^> M.merge_mds [ mda; mdb ], input'')))
+    let parse stateful_input =
+      bind (p.parse stateful_input) (fun (a, input, state) ->
+          let aa, mda = split_md a in
+          bind
+            ((mf aa).parse (input, state))
+            (fun (b, input', state') ->
+              let bb, mdb = split_md b in
+              ok (bb <^> M.merge_mds [ mda; mdb ], input', state')))
     in
     { parse }
 
@@ -266,24 +274,23 @@ module Parser (M : ParserInner) (I : ParserInput) :
   let ( << ) = replace
 
   let pass =
-    let parser input = Result.ok (() <^> M.default_md, input) in
+    let parser (input, state) = Result.ok (() <^> M.default_md, input, state) in
     { parse = parser }
 
-  let fail e =
+  let fail s =
     {
       parse =
-        (fun { pos; input; state } ->
-          Result.error [ { err = e input; pos; state } ]);
+        (fun stateful_input -> Result.error [ M.create_error s stateful_input ]);
     }
 
   (** This is the canonical alternate which tries the first parser and then if
       that doesnt work, tries the second parser *)
   let alternate pa pb =
     let open Result in
-    let parse input =
-      match pa.parse input with
-      | Ok (a, input') -> ok (a, input')
-      | Error _ -> pb.parse input
+    let parse stateful_input =
+      match pa.parse stateful_input with
+      | Ok (a, input, state) -> ok (a, input, state)
+      | Error _ -> pb.parse stateful_input
     in
     { parse }
 
@@ -291,7 +298,7 @@ module Parser (M : ParserInner) (I : ParserInput) :
 
   let choice parser_list =
     match parser_list with
-    | [] -> fail (fun _ -> "choice parser had no choices to choose from")
+    | [] -> fail "choice parser had no choices to choose from"
     | p_acc :: ps -> List.fold_left (fun acc p -> acc <|> p) p_acc ps
 
   (* Not and is are kind of cruches and they're not really best practice. Take
@@ -303,16 +310,17 @@ module Parser (M : ParserInner) (I : ParserInput) :
      subscripts) <|> (pure None))]*)
   let is' p =
     let open Result in
-    let parser input =
-      bind (p.parse input) (fun _ -> ok (() <^> M.default_md, input))
+    let parser ((input, state) as stateful_input) =
+      bind (p.parse stateful_input) (fun _ ->
+          ok (() <^> M.default_md, input, state))
     in
     { parse = parser }
 
   let not' (p : unit t) =
-    let parser input =
-      match p.parse input with
-      | Ok _ -> (fail (fun _ -> "didn't satisfy not")).parse input
-      | Error _ -> Result.ok (() <^> M.default_md, input)
+    let parser ((input, state) as stateful_input) =
+      match p.parse stateful_input with
+      | Ok _ -> (fail "didn't satisfy not").parse stateful_input
+      | Error _ -> Result.ok (() <^> M.default_md, input, state)
     in
     { parse = parser }
 
@@ -320,48 +328,44 @@ module Parser (M : ParserInner) (I : ParserInput) :
 
   let take : atom t =
     let open Result in
-    let parse ({ input; pos; state } as i) =
-      I.separate input |> function
-      | None -> (fail (fun _ -> "end of input")).parse i
-      | Some (head, rest) ->
-          ok
-            ( head <^> M.take_input_md pos,
-              { input = rest; pos = pos + 1; state } )
+    let parse ((input, state) as stateful_input) =
+      M.separate input |> function
+      | None -> (fail "end of input").parse stateful_input
+      | Some (head, rest) -> ok (head <^> M.take_input_md input, rest, state)
     in
     { parse }
 
   let satisfies predicate : atom t =
     take >>= fun a ->
     if predicate a then pure a
-    else
-      fail (fun _ ->
-          Printf.sprintf "Predicate not satisfied for %s" (I.show_atom a))
+    else fail (Printf.sprintf "Predicate not satisfied for %s" (M.show_atom a))
 
   let ( <!!> ) (l : 'a t) f =
-    let parse ({ input; pos; state } as i : input) =
-      l.parse i
-      |> Result.map_error (fun e -> [ { err = f input; pos; state } ] @ e)
+    let parse stateful_input =
+      l.parse stateful_input
+      |> Result.map_error (fun es ->
+             M.create_error (f stateful_input) stateful_input :: es)
     in
     { parse }
 
-  let ( <!> ) (l : 'a t) f = l <!!> fun _ -> f
+  let ( <!> ) (l : 'a t) e = l <!!> fun _ -> e
 
   let atom (c : atom) : atom t =
     satisfies (fun a -> a == c)
-    <!> Printf.sprintf "Failed to match atom %s" (I.show_atom c)
+    <!> Printf.sprintf "Failed to match atom %s" (M.show_atom c)
 
   (* TODO: figure out the correct reversing for this and all its dependencies
      *)
   let many p =
-    let rec many' acc input =
-      match p.parse input with
-      | Ok (a, input') -> many' (a :: acc) input'
-      | Error _ -> (acc, input)
+    let rec many' acc ((input, state) as stateful_input) =
+      match p.parse stateful_input with
+      | Ok (a, input, state) -> many' (a :: acc) (input, state)
+      | Error _ -> (acc, input, state)
     in
-    let parse input =
-      let result_as, input' = many' [] input in
+    let parse stateful_input =
+      let result_as, input, state = many' [] stateful_input in
       let span = List.map (fun r -> r |> M.md) result_as |> M.merge_mds in
-      Result.ok (List.rev result_as <^> span, input')
+      Result.ok (List.rev result_as <^> span, input, state)
     in
     { parse }
 
@@ -374,18 +378,18 @@ module Parser (M : ParserInner) (I : ParserInput) :
   let rec rept n p =
     match n - 1 with
     | 0 -> (fun x -> x :: []) $> p
-    | n when n > 0 -> (fun p ps -> p :: ps) $> p <*> rept (n - 1) p
-    | _ -> fail (fun _ -> "can't repeat a parser negative times")
+    | _ when n > 0 -> (fun p ps -> p :: ps) $> p <*> rept (n - 1) p
+    | _ -> fail "can't repeat a parser negative times"
 
   let optional (p : 'a t) =
     {
       parse =
-        (fun input ->
-          match p.parse input with
-          | Ok (a, input') ->
-              let a, md = M.split_md a in
-              Ok (Some a <^> md, input')
-          | Error _ -> Ok (None <^> M.default_md, input));
+        (fun ((input, state) as stateful_input) ->
+          match p.parse stateful_input with
+          | Ok (a, input, state) ->
+              let a, md = split_md a in
+              Ok (Some a <^> md, input, state)
+          | Error _ -> Ok (None <^> M.default_md, input, state));
     }
 
   let ( ?% ) = optional
@@ -402,17 +406,17 @@ module Parser (M : ParserInner) (I : ParserInput) :
   let some_sep p sep =
     many_sep p sep >>= fun els ->
     if List.length els < 1 then
-      fail (fun _ -> "couldn't match one or more delimited items")
+      fail "couldn't match one or more delimited items"
     else pure els
 
+  let some_sep_merge p sep = merge_list_md $> some_sep p sep
+
   let get =
-    let parse (input : input) = Ok (input.state <^> M.default_md, input) in
+    let parse (input, state) = Ok (state <^> M.default_md, input, state) in
     { parse }
 
   let set new_state =
-    let parse { input; pos; _ } =
-      Ok (() <^> M.default_md, { input; pos; state = new_state })
-    in
+    let parse (input, _) = Ok (() <^> M.default_md, input, new_state) in
     { parse }
 
   let modify f = f $> get >>= set

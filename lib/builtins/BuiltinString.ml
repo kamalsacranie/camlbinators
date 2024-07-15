@@ -1,15 +1,19 @@
-module StringParserInner = struct
+module StringParserInner (M : sig
+  type state [@@deriving show, eq]
+end) =
+struct
   type metadata' = { s : int; l : int } [@@deriving show, eq, yojson]
   type metadata = metadata' option [@@deriving show, eq, yojson]
   type error = string [@@deriving show]
   type 'a with_md = 'a * metadata [@@deriving show, eq, yojson]
+  type input = { input : string; pos : int } [@@deriving show]
+  type atom = char [@@deriving show]
+  type state = M.state [@@deriving show, eq]
 
   let md (_, md) = md
   let nomd (a, _) = a
   let _bind_md md a = (md, a)
-  let split_md x = x
   let default_md = None
-  let take_input_md pos = Some { s = pos; l = 1 }
 
   let merge_mds mds =
     List.fold_left
@@ -27,22 +31,15 @@ module StringParserInner = struct
       None mds
 
   let bind_md md a = (a, md)
-end
-
-module StringInput (M : sig
-  type state [@@deriving show, eq]
-end) =
-struct
-  type atom = char [@@deriving show]
-  type feed = string [@@deriving show]
-  type state = M.state [@@deriving show, eq]
-
   let valid_string input = String.length input > 0
-  let head input = if valid_string input then Some input.[0] else None
 
-  let rest input =
+  let head input =
+    if valid_string input.input then Some input.input.[0] else None
+
+  let rest { input; pos } =
     if valid_string input then
-      String.sub input 1 (String.length input - 1) |> Option.some
+      { input = String.sub input 1 (String.length input - 1); pos = pos + 1 }
+      |> Option.some
     else None
 
   let separate input =
@@ -51,6 +48,8 @@ struct
         bind (rest input) (fun rest -> some (head, rest)))
 
   let show_atom atom = Printf.sprintf "%c" atom
+  let create_error error _ = error
+  let take_input_md { pos; _ } = Some { s = pos; l = 1 }
 end
 
 module Utils = struct
@@ -65,7 +64,8 @@ module Parser (M : sig
   type state [@@deriving show, eq]
 end) =
 struct
-  include Parser.Parser (StringParserInner) (StringInput (M))
+  module ParserInner = StringParserInner (M)
+  include Parser.Parser (ParserInner)
   open Utils
 
   let many_char_as_string p = string_of_char_list $> many_merge p
